@@ -3,11 +3,10 @@ uvicorn[standard]
 python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
-pydantic
+pydantic[email]
 pydantic-settings
 opencv-python
 numpy
 ultralytics
 python-dotenv
 requests
-pymongo

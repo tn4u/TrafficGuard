@@ -4,43 +4,118 @@ import numpy as np
 from typing import Dict, List, Any, Tuple
 from ultralytics import YOLO
 from app.core.config import settings
-import requests
-from pathlib import Path
 
-def download_model_from_github():
-    model_url = "https://github.com/qchau0202/NavFlow-ML/releases/download/v1.0.0/navflow_traffic_detection_v1.pt"
-    model_path = Path(settings.MODEL_DIR) / "navflow_traffic_detection_v1.pt"
-    
-    # Check if model already exists
-    if model_path.exists():
-        print(f"Model already exists at {model_path}")
-        return
-    
-    # Create the directory if it doesn't exist
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Download the model
-    print(f"Downloading model from {model_url}...")
-    response = requests.get(model_url)
-    if response.status_code == 200:
-        with open(model_path, 'wb') as f:
-            f.write(response.content)
-        print(f"Model downloaded successfully to {model_path}")
-    else:
-        print(f"Failed to download model: {response.status_code}")
+# ── Per-class colour palette (BGR) ──────────────────────────────────────────
+# Each class_id maps to a distinct, high-contrast colour.
+CLASS_COLORS = [
+    (0, 140, 255),   # class 0 → orange  (motorcycle)
+    (255, 80,  80),  # class 1 → blue    (bicycle)
+    (0, 220,  90),   # class 2 → green
+    (200,  0, 200),  # class 3 → purple
+    (0, 200, 200),   # class 4 → cyan
+]
+
+def _get_color(class_id: int) -> Tuple[int, int, int]:
+    return CLASS_COLORS[class_id % len(CLASS_COLORS)]
+
+
+def _draw_label(
+    frame: np.ndarray,
+    text: str,
+    x1: int, y1: int, x2: int, y2: int,
+    color: Tuple[int, int, int],
+    font_scale: float = 0.48,
+    thickness: int = 1,
+):
+    """
+    Draw a filled pill-shaped label tag above (or inside) a bounding box.
+    Falls back to drawing inside the box when there's no room above.
+    """
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    pad_x, pad_y = 6, 4
+
+    tag_w = tw + pad_x * 2
+    tag_h = th + pad_y * 2 + baseline
+
+    # Preferred: above the box
+    ty = y1 - tag_h - 2
+    if ty < 0:
+        # Fall back: inside the box, top-left corner
+        ty = y1 + 2
+
+    tx = x1
+    # Keep tag within frame width
+    if tx + tag_w > frame.shape[1]:
+        tx = frame.shape[1] - tag_w - 1
+    if tx < 0:
+        tx = 0
+
+    # Filled background rectangle
+    cv2.rectangle(frame, (tx, ty), (tx + tag_w, ty + tag_h), color, cv2.FILLED)
+
+    # Lighter border around the tag for crispness
+    cv2.rectangle(frame, (tx, ty), (tx + tag_w, ty + tag_h), (255, 255, 255), 1)
+
+    # White text on top
+    cv2.putText(
+        frame, text,
+        (tx + pad_x, ty + pad_y + th),
+        font, font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def _draw_summary_bar(frame: np.ndarray, counts: Dict[str, int], total: int):
+    """
+    Draw a semi-transparent summary bar at the very top of the frame.
+    Shows total count and a breakdown by class.
+    """
+    h, w = frame.shape[:2]
+    bar_h = 36
+
+    # Semi-transparent dark strip
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, bar_h), (20, 20, 20), cv2.FILLED)
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    # Total on the left
+    cv2.putText(
+        frame,
+        f"Detections: {total}",
+        (10, 24),
+        font, 0.55,
+        (255, 255, 255),
+        1, cv2.LINE_AA,
+    )
+
+    # Per-class counts on the right
+    x_cursor = w - 10
+    for label, cnt in reversed(list(counts.items())):
+        tag = f"{label}: {cnt}"
+        (tw, _), _ = cv2.getTextSize(tag, font, 0.45, 1)
+        x_cursor -= (tw + 20)
+        cv2.putText(frame, tag, (x_cursor, 24), font, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+
 
 class YOLOService:
     def __init__(self):
         self.model = None
         self.load_model()
-        # Classes will be loaded from the model itself
 
     def load_model(self):
         """Load the custom trained YOLO model"""
         try:
-            model_path = os.path.join(settings.MODEL_DIR, "navflow_traffic_detection_v1.pt")
+            model_path = os.path.join(settings.MODEL_DIR, "motobike_detection.pt")
             if not os.path.exists(model_path):
-                download_model_from_github()  # Download if not found
+                raise FileNotFoundError(
+                    f"Model not found at {model_path}. "
+                    f"Please place motobike_detection.pt in {settings.MODEL_DIR}"
+                )
             self.model = YOLO(model_path)
             print(f"Custom model loaded successfully from {model_path}")
             print(f"Model classes: {self.model.names}")
@@ -50,17 +125,15 @@ class YOLOService:
 
     async def detect(self, frame: np.ndarray) -> Dict[str, Any]:
         """
-        Perform traffic detection on a frame using custom model
-        Returns detection results and road fullness
+        Perform traffic detection on a frame using custom model.
+        Returns detection results and road fullness.
         """
         if self.model is None:
             raise RuntimeError("Model not loaded")
-            
+
         try:
-            # Run inference with custom model
             results = self.model(frame)
-            
-            # Calculate road fullness
+
             frame_area = frame.shape[0] * frame.shape[1]
             vehicle_area = 0
             detections = []
@@ -70,26 +143,22 @@ class YOLOService:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     confidence = float(box.conf[0])
                     class_id = int(box.cls[0])
-                    label = self.model.names[class_id]  # Get label from model's class names
-                    
-                    # Calculate vehicle area
+                    label = self.model.names[class_id]
+
                     vehicle_area += (x2 - x1) * (y2 - y1)
-                    
-                    # Add detection
                     detections.append({
                         "label": label,
                         "confidence": confidence,
                         "bbox": [x1, y1, x2, y2],
-                        "class_id": class_id
+                        "class_id": class_id,
                     })
 
-            # Calculate fullness
-            fullness = (vehicle_area / frame_area) * 100
+            fullness = (vehicle_area / frame_area) * 100 if frame_area > 0 else 0
 
             return {
                 "detections": detections,
                 "fullness": fullness,
-                "total_vehicles": len(detections)
+                "total_vehicles": len(detections),
             }
         except Exception as e:
             print(f"Error during detection: {e}")
@@ -97,60 +166,78 @@ class YOLOService:
 
     async def detect_with_visualization(self, frame: np.ndarray) -> Tuple[Dict, np.ndarray]:
         """
-        Run detection and return both results and visualization frame
+        Run detection and return both results and a clean annotated frame.
+        Each detection gets:
+          • A coloured bounding box (per class)
+          • A numbered badge in the top-left corner of the box
+          • A pill-shaped label tag (class + confidence) above / inside the box
+        A summary bar at the top shows totals.
         """
-        # Get detection results
         results = await self.detect(frame)
-        
-        # Create a copy of the frame for visualization
-        vis_frame = frame.copy()
-        
-        # Draw bounding boxes and labels
-        for detection in results["detections"]:
-            x1, y1, x2, y2 = detection["bbox"]
-            label = detection["label"]
-            confidence = detection["confidence"]
-            
-            # Draw bounding box
-            cv2.rectangle(vis_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            
-            # Draw label
-            label_text = f"{label}: {confidence:.2f}"
-            cv2.putText(vis_frame, label_text, (int(x1), int(y1) - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        
-        # Add total count
-        cv2.putText(vis_frame, f"Total Vehicles: {results['total_vehicles']}", 
-                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        
-        return results, vis_frame
+        vis = frame.copy()
+
+        counts: Dict[str, int] = {}
+        per_class_idx: Dict[int, int] = {}  # running index per class_id
+
+        for det in results["detections"]:
+            x1, y1, x2, y2 = det["bbox"]
+            label = det["label"]
+            conf = det["confidence"]
+            class_id = det["class_id"]
+            color = _get_color(class_id)
+
+            # Per-class running index (1-based)
+            per_class_idx[class_id] = per_class_idx.get(class_id, 0) + 1
+            idx = per_class_idx[class_id]
+
+            counts[label] = counts.get(label, 0) + 1
+
+            # ── Bounding box ──────────────────────────────────────────────
+            box_thickness = max(2, int((x2 - x1 + y2 - y1) / 200))
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, box_thickness)
+
+            # ── Numbered badge (top-left corner of box) ───────────────────
+            badge_text = str(idx)
+            badge_r = 11
+            badge_cx = x1 + badge_r
+            badge_cy = y1 + badge_r
+            cv2.circle(vis, (badge_cx, badge_cy), badge_r, color, cv2.FILLED)
+            cv2.circle(vis, (badge_cx, badge_cy), badge_r, (255, 255, 255), 1)
+            (bw, bh), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            cv2.putText(
+                vis, badge_text,
+                (badge_cx - bw // 2, badge_cy + bh // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                (255, 255, 255), 1, cv2.LINE_AA,
+            )
+
+            # ── Label tag ─────────────────────────────────────────────────
+            label_text = f"{label}  {conf:.0%}"
+            _draw_label(vis, label_text, x1, y1, x2, y2, color)
+
+        # ── Summary bar ───────────────────────────────────────────────────
+        _draw_summary_bar(vis, counts, results["total_vehicles"])
+
+        return results, vis
 
     def draw_detections(self, frame: np.ndarray, detections: List[Dict]) -> np.ndarray:
-        """Draw detection boxes on the frame"""
+        """Draw detection boxes on the frame (used by the live camera stream)."""
         try:
             for det in detections:
                 x1, y1, x2, y2 = det["bbox"]
                 label = det["label"]
                 conf = det["confidence"]
-                
-                # Draw box
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                
-                # Draw label
-                cv2.putText(
-                    frame,
-                    f"{label} {conf:.2f}",
-                    (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 0),
-                    2
-                )
-            
+                class_id = det.get("class_id", 0)
+                color = _get_color(class_id)
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                _draw_label(frame, f"{label}  {conf:.0%}", x1, y1, x2, y2, color)
+
             return frame
         except Exception as e:
             print(f"Error drawing detections: {e}")
             return frame
 
+
 # Create singleton instance
-yolo_service = YOLOService() 
+yolo_service = YOLOService()

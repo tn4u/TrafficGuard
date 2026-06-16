@@ -70,9 +70,9 @@ const ViolationLog = ({ violations, videoUrl, onSeek }) => {
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center gap-2 mb-4 flex-shrink-0 pb-3 border-b border-gray-100">
-        <FiAlertTriangle className="text-red-500 flex-shrink-0" />
-        <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Violation Log</h3>
-        <span className="ml-auto bg-red-50 text-red-600 text-xs px-2.5 py-0.5 rounded-full border border-red-200 flex-shrink-0 font-medium">
+        <FiAlertTriangle className="text-emerald-500 flex-shrink-0" />
+        <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Detection Log</h3>
+        <span className="ml-auto bg-emerald-50 text-emerald-700 text-xs px-2.5 py-0.5 rounded-full border border-emerald-200 flex-shrink-0 font-medium">
           {violations.length} found
         </span>
       </div>
@@ -120,7 +120,7 @@ const ViolationLog = ({ violations, videoUrl, onSeek }) => {
 
               {/* Info */}
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-bold text-red-600 mb-0.5">No Helmet #{i + 1}</p>
+                <p className="text-xs font-bold text-emerald-700 mb-0.5 capitalize">{v.label} #{i + 1}</p>
                 <div className="flex items-center gap-1.5 text-xs text-gray-400">
                   <FiClock className="text-xs flex-shrink-0" />
                   <span className="font-mono">{fmt(v.timestamp)}</span>

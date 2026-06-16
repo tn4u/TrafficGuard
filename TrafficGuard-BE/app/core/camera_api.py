@@ -1,6 +1,6 @@
 # Camera URLs for HCMC traffic cameras
 CAMERA_URLS = {
-    'NKKN_TranQuocToan' : "http://giaothong.hochiminhcity.gov.vn/expandcameraplayer/?camId=58e49ff8d9d6200011e0b9d4&camLocation=Nam%20K%E1%BB%B3%20Kh%E1%BB%9Fi%20Ngh%C4%A9a%20-%20Tr%E1%BA%A7n%20Qu%E1%BB%91c%20To%E1%BA%A3n&camMode=camera&videoUrl=https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8",
+    'NKKN_TranQuocToan' : "https://giaothong.hochiminhcity.gov.vn/communication/ping?_=1781596970242",
     'NKKN_VoThiSau': "http://giaothong.hochiminhcity.gov.vn/expandcameraplayer/?camId=58af8a0bbd82540010390c25&camLocation=Nam%20K%E1%BB%B3%20Kh%E1%BB%9Fi%20Ngh%C4%A9a%20-%20V%C3%B5%20Th%E1%BB%8B%20S%C3%A1u&camMode=camera&videoUrl=https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8",
     'NKKN_DBP1': "http://giaothong.hochiminhcity.gov.vn/expandcameraplayer/?camId=58af8d68bd82540010390c2e&camLocation=Nam%20K%E1%BB%B3%20Kh%E1%BB%9Fi%20Ngh%C4%A9a%20-%20%C4%90i%E1%BB%87n%20Bi%C3%AAn%20Ph%E1%BB%A7%202&camMode=camera&videoUrl=https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8",
     'NKKN_DBP2':"http://giaothong.hochiminhcity.gov.vn/expandcameraplayer/?camId=58af8b69bd82540010390c28&camLocation=Nam%20K%E1%BB%B3%20Kh%E1%BB%9Fi%20Ngh%C4%A9a%20-%20%C4%90i%E1%BB%87n%20Bi%C3%AAn%20Ph%E1%BB%A7%201&camMode=camera&videoUrl=https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8",

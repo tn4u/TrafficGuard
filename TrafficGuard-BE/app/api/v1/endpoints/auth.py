@@ -4,7 +4,6 @@ from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
-from app.core.mongo import users_collection
 from app.models.user import UserModel, UserResponseModel
 from app.core.config import settings
 import os
@@ -20,6 +19,9 @@ router = APIRouter()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
+# In-memory user store (replaces MongoDB users_collection)
+_users_db: dict[str, dict] = {}
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -28,14 +30,14 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
-@router.post("/register", response_model=UserModel)
+@router.post("/register", response_model=UserResponseModel)
 def register(user: UserModel):
-    if users_collection.find_one({"email": user.email}):
+    if user.email in _users_db:
         raise HTTPException(status_code=400, detail="Email already registered")
     hashed_password = pwd_context.hash(user.password)
     user_dict = user.dict()
     user_dict["password"] = hashed_password
-    users_collection.insert_one(user_dict)
+    _users_db[user.email] = user_dict
     return user
 
 def create_refresh_token(data: dict):
@@ -46,7 +48,7 @@ def create_refresh_token(data: dict):
 
 @router.post("/login", response_model=Token)
 def login(user: UserLogin, response: Response):
-    db_user = users_collection.find_one({"email": user.email})
+    db_user = _users_db.get(user.email)
     if not db_user or not pwd_context.verify(user.password, db_user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     access_token = create_access_token({"sub": db_user["email"], "role": db_user.get("role", "guest")})
@@ -96,8 +98,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    db_user = users_collection.find_one({"email": email})
+    db_user = _users_db.get(email)
     if not db_user:
         raise credentials_exception
-    return db_user 
-
+    return db_user

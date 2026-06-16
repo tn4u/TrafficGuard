@@ -9,6 +9,8 @@ import numpy as np
 import io
 import tempfile
 import os
+import asyncio
+from functools import partial
 from app.services.yolo_service import yolo_service
 
 router = APIRouter()
@@ -18,7 +20,10 @@ router = APIRouter()
 async def analyse_image(file: UploadFile = File(...)):
     """
     Upload a JPG/PNG image.
-    Returns JSON with detections + a URL-encoded annotated image.
+    Returns the annotated image (JPEG) with detection bounding boxes drawn.
+    Response headers carry summary stats:
+      X-Total-Detections  — number of objects detected
+      X-Fullness          — road fullness percentage
     """
     if file.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(status_code=400, detail="Only JPG/PNG images are accepted.")
@@ -30,7 +35,7 @@ async def analyse_image(file: UploadFile = File(...)):
         if frame is None:
             raise HTTPException(status_code=400, detail="Could not decode image.")
 
-        # Run detection
+        # Run detection + draw bounding boxes
         results, vis_frame = await yolo_service.detect_with_visualization(frame)
 
         # Encode annotated frame as JPEG
@@ -40,10 +45,13 @@ async def analyse_image(file: UploadFile = File(...)):
             io.BytesIO(buffer.tobytes()),
             media_type="image/jpeg",
             headers={
-                "X-Total-Vehicles": str(results["total_vehicles"]),
+                "X-Total-Detections": str(results["total_vehicles"]),
                 "X-Fullness": str(round(results["fullness"], 2)),
+                "Access-Control-Expose-Headers": "X-Total-Detections, X-Fullness",
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -66,69 +74,96 @@ async def analyse_image_json(file: UploadFile = File(...)):
 
         results = await yolo_service.detect(frame)
         return {
-            "total_vehicles": results["total_vehicles"],
+            "total_detections": results["total_vehicles"],
             "fullness": round(results["fullness"], 2),
             "detections": results["detections"],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _process_video_sync(tmp_path: str):
+    """
+    CPU-bound video processing — runs in a thread executor so it does not
+    block the async event loop.
+    Returns a list of detection events (one per sampled frame).
+    """
+    cap = cv2.VideoCapture(tmp_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    sample_every = max(1, int(fps))  # 1 frame per second
+
+    detections_log = []
+    frame_idx = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % sample_every == 0:
+            timestamp = round(frame_idx / fps, 2)
+
+            # Run YOLO synchronously inside the thread
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            try:
+                results = loop.run_until_complete(yolo_service.detect(frame))
+            finally:
+                loop.close()
+
+            # Record every detection found at this timestamp
+            for det in results["detections"]:
+                detections_log.append({
+                    "timestamp": timestamp,
+                    "confidence": round(det["confidence"], 4),
+                    "label": det["label"],
+                    "bbox": det["bbox"],
+                })
+
+        frame_idx += 1
+
+    cap.release()
+    total_frames_sampled = max(1, frame_idx // sample_every)
+    return detections_log, total_frames_sampled
 
 
 @router.post("/video")
 async def analyse_video(file: UploadFile = File(...)):
     """
     Upload an MP4 video.
-    Samples every Nth frame, runs YOLO on each, returns violation list.
-    The annotated video is not re-encoded server-side to keep latency low —
-    violations reference original timestamps that the frontend can seek to.
+    Samples 1 frame per second, runs YOLO on each.
+    Returns a list of all detections (motorcycle / bicycle) with timestamps.
+    The frontend can use the timestamps to seek the original video to those moments.
     """
     if file.content_type not in ("video/mp4", "video/mpeg", "video/quicktime"):
         raise HTTPException(status_code=400, detail="Only MP4 videos are accepted.")
 
+    tmp_path = None
     try:
         # Write to a temp file so OpenCV can open it
-        suffix = ".mp4"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(await file.read())
             tmp_path = tmp.name
 
-        cap = cv2.VideoCapture(tmp_path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
-        sample_every = max(1, int(fps))  # 1 frame per second
-
-        violations = []
-        frame_idx = 0
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if frame_idx % sample_every == 0:
-                timestamp = frame_idx / fps
-                results = await yolo_service.detect(frame)
-
-                # Collect no-helmet detections as violations
-                for det in results["detections"]:
-                    label_lower = det["label"].lower().replace(" ", "_")
-                    if "no" in label_lower or "without" in label_lower or "nohelmet" in label_lower:
-                        violations.append({
-                            "timestamp": round(timestamp, 2),
-                            "confidence": round(det["confidence"], 4),
-                            "label": det["label"],
-                            "bbox": det["bbox"],
-                        })
-
-            frame_idx += 1
-
-        cap.release()
-        os.unlink(tmp_path)
+        # Run the CPU-heavy loop in a thread so we don't block the event loop
+        loop = asyncio.get_event_loop()
+        detections_log, total_frames_sampled = await loop.run_in_executor(
+            None, partial(_process_video_sync, tmp_path)
+        )
 
         return {
-            "total_frames_sampled": frame_idx // sample_every,
-            "violation_count": len(violations),
-            "violations": violations,
+            "total_frames_sampled": total_frames_sampled,
+            "total_detections": len(detections_log),
+            # Frontend expects the key "violations" to populate the violation log UI
+            "violations": detections_log,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)

@@ -20,12 +20,12 @@ class Settings(BaseSettings):
     # CORS settings
     BACKEND_CORS_ORIGINS: list = ["*"]  # In production, replace with specific origins
 
-    MONGO_URI: str = ""
     JWT_SECRET_KEY: str = ""
 
     class Config:
         case_sensitive = True
         env_file = ".env"
+        extra = "ignore"
 
 # Create settings instance
-settings = Settings() 
+settings = Settings()

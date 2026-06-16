@@ -41,7 +41,7 @@ const ManualDashboard = () => {
           </div>
           <div>
             <h1 className="text-lg font-bold text-emerald-700 leading-tight">
-              Helmet Detection
+              Motorbike Detection
             </h1>
             <p className="text-xs text-gray-400">Manual Analysis Mode</p>
           </div>
@@ -49,9 +49,9 @@ const ManualDashboard = () => {
 
         <div className="flex items-center gap-3">
           {isDone && fileType === "video" && violations.length > 0 && (
-            <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full bg-red-50 border border-red-200 text-red-600 font-medium">
-              <FiAlertCircle className="text-sm" />
-              {violations.length} violation{violations.length !== 1 ? "s" : ""} detected
+            <span className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 font-medium">
+              <FiShield className="text-sm" />
+              {violations.length} detection{violations.length !== 1 ? "s" : ""} found
             </span>
           )}
           {isDone && fileType === "video" && violations.length === 0 && (
