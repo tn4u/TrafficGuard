@@ -87,7 +87,7 @@ async def analyse_image_json(file: UploadFile = File(...)):
 # Minimum confidence to accept a motorbike detection
 _MIN_CONF = 0.35
 # Minimum votes before we can finalize a bike's helmet status
-_MIN_VOTES = 3
+_MIN_VOTES = 2
 
 
 def _finalize_track(track_id, votes, completed_ids, frame, timestamp, detections_log, violations_dir):
@@ -132,8 +132,8 @@ def _process_video_sync(tmp_path: str):
     cap = cv2.VideoCapture(tmp_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    # Target ~15 samples per second for a good accuracy / speed balance
-    target_fps = 15
+    # Target 10 samples per second to ensure ByteTrack IoU matching succeeds
+    target_fps = 10
     step = max(1, int(fps / target_fps))
 
     detections_log = []
@@ -145,18 +145,25 @@ def _process_video_sync(tmp_path: str):
     violations_dir = os.path.join(os.getcwd(), "violations")
     os.makedirs(violations_dir, exist_ok=True)
 
-    frame_idx = 0
+    current_idx = 0
     last_frame = None
     last_timestamp = 0.0
 
-    while frame_idx < total_frames:
-        # Seek directly to the target frame — much faster than decoding every frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
+    while current_idx < total_frames:
+        # Fast-forward frames without decoding the full image matrix using grab()
+        ret = cap.grab()
+        if not ret:
+            break
+            
+        if current_idx % step != 0:
+            current_idx += 1
+            continue
+
+        ret, frame = cap.retrieve()
         if not ret:
             break
 
-        timestamp = round(frame_idx / fps, 3)
+        timestamp = round(current_idx / fps, 3)
         last_frame = frame.copy()
         last_timestamp = timestamp
 
@@ -240,7 +247,7 @@ def _process_video_sync(tmp_path: str):
         if frame_objects:
             tracking_data.append({"timestamp": timestamp, "objects": frame_objects})
 
-        frame_idx += step
+        current_idx += 1
 
     cap.release()
 
