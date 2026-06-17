@@ -84,49 +84,176 @@ async def analyse_image_json(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Minimum confidence to accept a motorbike detection
+_MIN_CONF = 0.35
+# Minimum votes before we can finalize a bike's helmet status
+_MIN_VOTES = 3
+
+
+def _finalize_track(track_id, votes, completed_ids, frame, timestamp, detections_log, violations_dir):
+    """Finalize a tracked motorcycle's helmet verdict and log any violation."""
+    if track_id in completed_ids:
+        return
+    if votes[track_id]["helmet"] + votes[track_id]["no_helmet"] < 2:
+        return  # Too few observations — skip
+
+    completed_ids.add(track_id)
+    if votes[track_id]["no_helmet"] > votes[track_id]["helmet"]:
+        x1, y1, x2, y2 = (votes[track_id]["best_box"] or [0, 0, 10, 10])
+        if frame is not None:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.putText(frame, f"No Helmet", (x1, max(0, y1 - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        img_filename = f"violation_{track_id}_{int(timestamp * 100)}.jpg"
+        img_path = os.path.join(violations_dir, img_filename)
+        if frame is not None:
+            cv2.imwrite(img_path, frame)
+        detections_log.append({
+            "id": f"track_{track_id}",
+            "timestamp": timestamp,
+            "confidence": round(votes[track_id]["best_conf"], 4),
+            "label": "no_helmet",
+            "bbox": votes[track_id]["best_box"],
+            "image_path": f"/static/violations/{img_filename}"
+        })
+
+
 def _process_video_sync(tmp_path: str):
     """
     CPU-bound video processing — runs in a thread executor so it does not
     block the async event loop.
-    Returns a list of detection events (one per sampled frame).
+
+    Strategy:
+    - Sample at ~15 FPS using direct frame-seeking (avoids decoding every frame).
+    - Filter detections by confidence >= _MIN_CONF to reduce noise.
+    - Use a multi-frame voting system with _MIN_VOTES threshold.
+    - Finalize any remaining unresolved tracks at the end of the video.
     """
     cap = cv2.VideoCapture(tmp_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    sample_every = max(1, int(fps))  # 1 frame per second
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    # Target ~15 samples per second for a good accuracy / speed balance
+    target_fps = 15
+    step = max(1, int(fps / target_fps))
 
     detections_log = []
-    frame_idx = 0
+    tracking_data = []
 
-    while True:
+    votes = {}          # track_id -> { helmet, no_helmet, best_conf, best_box, status }
+    completed_ids = set()
+
+    violations_dir = os.path.join(os.getcwd(), "violations")
+    os.makedirs(violations_dir, exist_ok=True)
+
+    frame_idx = 0
+    last_frame = None
+    last_timestamp = 0.0
+
+    while frame_idx < total_frames:
+        # Seek directly to the target frame — much faster than decoding every frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if not ret:
             break
 
-        if frame_idx % sample_every == 0:
-            timestamp = round(frame_idx / fps, 2)
+        timestamp = round(frame_idx / fps, 3)
+        last_frame = frame.copy()
+        last_timestamp = timestamp
 
-            # Run YOLO synchronously inside the thread
-            import asyncio as _asyncio
-            loop = _asyncio.new_event_loop()
-            try:
-                results = loop.run_until_complete(yolo_service.detect(frame))
-            finally:
-                loop.close()
+        # Run ByteTrack on this frame
+        results = yolo_service.track_sync(frame)
 
-            # Record every detection found at this timestamp
-            for det in results["detections"]:
-                detections_log.append({
-                    "timestamp": timestamp,
-                    "confidence": round(det["confidence"], 4),
-                    "label": det["label"],
-                    "bbox": det["bbox"],
+        frame_objects = []
+
+        for r in results:
+            if r.boxes is None or r.boxes.id is None:
+                continue
+
+            boxes = r.boxes.xyxy.cpu().numpy()
+            track_ids = r.boxes.id.int().cpu().tolist()
+            classes = r.boxes.cls.int().cpu().tolist()
+            confs = r.boxes.conf.cpu().tolist()
+
+            for box, track_id, class_id, conf in zip(boxes, track_ids, classes, confs):
+                # Only motorcycles (class 0) above confidence threshold
+                if class_id != 0 or conf < _MIN_CONF:
+                    continue
+
+                x1, y1, x2, y2 = map(int, box)
+
+                if track_id not in votes:
+                    votes[track_id] = {
+                        "helmet": 0, "no_helmet": 0,
+                        "best_conf": 0, "best_box": None,
+                        "status": "Unknown"
+                    }
+
+                if conf > votes[track_id]["best_conf"]:
+                    votes[track_id]["best_conf"] = conf
+                    votes[track_id]["best_box"] = [x1, y1, x2, y2]
+
+                # Helmet check (if not already finalized)
+                if track_id not in completed_ids:
+                    if y2 > y1 and x2 > x1:
+                        rider_crop = yolo_service._get_rider_crop(frame, x1, y1, x2, y2)
+                        if rider_crop is not None:
+                            h_res = yolo_service.helmet_model(
+                                rider_crop,
+                                conf=yolo_service._HELMET_CONF_THRESH,
+                                imgsz=320,
+                                verbose=False,
+                            )
+                            best_h_conf = 0.0
+                            h_status = "unknown"
+                            for hr in h_res:
+                                for h_box in hr.boxes:
+                                    hc = float(h_box.conf[0])
+                                    hcls = int(h_box.cls[0])
+                                    if hc > best_h_conf:
+                                        best_h_conf = hc
+                                        h_status = yolo_service.helmet_model.names[hcls]
+
+                            if h_status in ("helmet", "no_helmet") and best_h_conf >= yolo_service._HELMET_CONF_THRESH:
+                                votes[track_id][h_status] += 1
+                                votes[track_id]["status"] = (
+                                    "No Helmet"
+                                    if votes[track_id]["no_helmet"] > votes[track_id]["helmet"]
+                                    else "Helmet"
+                                )
+
+                    # Finalize once enough votes are collected
+                    total_v = votes[track_id]["helmet"] + votes[track_id]["no_helmet"]
+                    if total_v >= _MIN_VOTES:
+                        _finalize_track(
+                            track_id, votes, completed_ids,
+                            frame, timestamp, detections_log, violations_dir
+                        )
+
+                # Record this object in the tracking timeline
+                frame_objects.append({
+                    "id": track_id,
+                    "bbox": [x1, y1, x2, y2],
+                    "label": votes[track_id]["status"],
+                    "conf": round(conf, 4),
                 })
 
-        frame_idx += 1
+        if frame_objects:
+            tracking_data.append({"timestamp": timestamp, "objects": frame_objects})
+
+        frame_idx += step
 
     cap.release()
-    total_frames_sampled = max(1, frame_idx // sample_every)
-    return detections_log, total_frames_sampled
+
+    # Final sweep: finalize any bikes that never accumulated enough votes mid-video
+    # (e.g. bikes that entered the frame only near the end)
+    for track_id in list(votes.keys()):
+        _finalize_track(
+            track_id, votes, completed_ids,
+            last_frame, last_timestamp, detections_log, violations_dir
+        )
+
+    total_frames_sampled = max(1, len(tracking_data))
+    return detections_log, total_frames_sampled, tracking_data
 
 
 @router.post("/video")
@@ -149,7 +276,7 @@ async def analyse_video(file: UploadFile = File(...)):
 
         # Run the CPU-heavy loop in a thread so we don't block the event loop
         loop = asyncio.get_event_loop()
-        detections_log, total_frames_sampled = await loop.run_in_executor(
+        detections_log, total_frames_sampled, tracking_data = await loop.run_in_executor(
             None, partial(_process_video_sync, tmp_path)
         )
 
@@ -158,6 +285,7 @@ async def analyse_video(file: UploadFile = File(...)):
             "total_detections": len(detections_log),
             # Frontend expects the key "violations" to populate the violation log UI
             "violations": detections_log,
+            "tracking_data": tracking_data,
         }
 
     except HTTPException:

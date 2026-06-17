@@ -1,52 +1,139 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiMaximize } from "react-icons/fi";
 
-// Mock bounding boxes drawn onto the canvas overlay
-const MOCK_BOXES = [
-  { x: 0.08, y: 0.1, w: 0.18, h: 0.32, label: "Helmet", color: "#16a34a", conf: 0.96 },
-  { x: 0.55, y: 0.08, w: 0.17, h: 0.3, label: "No Helmet", color: "#dc2626", conf: 0.91 },
-  { x: 0.33, y: 0.5, w: 0.15, h: 0.25, label: "Helmet", color: "#16a34a", conf: 0.88 },
-];
+/**
+ * Compute the letterbox-aware rendered rect of a video element inside its
+ * CSS container, mimicking object-fit: contain.
+ *
+ * Returns { offsetX, offsetY, scaleX, scaleY } — transforms native video
+ * pixel coords into canvas display pixel coords via:
+ *   canvasX = offsetX + nativeX * scaleX
+ *   canvasY = offsetY + nativeY * scaleY
+ */
+function getVideoRenderRect(canvas, video) {
+  const containerW = canvas.clientWidth;
+  const containerH = canvas.clientHeight;
+  const videoW = video.videoWidth;
+  const videoH = video.videoHeight;
+  if (!containerW || !containerH || !videoW || !videoH) return null;
 
-function drawBoxes(canvas, video) {
+  const containerAspect = containerW / containerH;
+  const videoAspect = videoW / videoH;
+
+  let renderW, renderH;
+  if (videoAspect > containerAspect) {
+    // Letterbox: video is wider → pillarbox on top/bottom
+    renderW = containerW;
+    renderH = containerW / videoAspect;
+  } else {
+    // Letterbox: video is taller → bars on left/right
+    renderH = containerH;
+    renderW = containerH * videoAspect;
+  }
+
+  const offsetX = (containerW - renderW) / 2;
+  const offsetY = (containerH - renderH) / 2;
+
+  return {
+    offsetX,
+    offsetY,
+    scaleX: renderW / videoW,
+    scaleY: renderH / videoH,
+  };
+}
+
+function drawBoxes(canvas, video, trackingData, currentTime) {
   if (!canvas || !video || !video.videoWidth) return;
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+
+  // Canvas internal resolution = container CSS pixels (for sharp drawing at any size)
+  const dpr = window.devicePixelRatio || 1;
+  const containerW = canvas.clientWidth;
+  const containerH = canvas.clientHeight;
+
+  const targetW = Math.round(containerW * dpr);
+  const targetH = Math.round(containerH * dpr);
+  if (canvas.width !== targetW) canvas.width = targetW;
+  if (canvas.height !== targetH) canvas.height = targetH;
+
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  MOCK_BOXES.forEach(({ x, y, w, h, label, color, conf }) => {
-    const bx = x * canvas.width;
-    const by = y * canvas.height;
-    const bw = w * canvas.width;
-    const bh = h * canvas.height;
-    const cs = 14;
+  if (!trackingData || trackingData.length === 0) return;
 
-    ctx.fillStyle = color + "18";
+  // Find the closest tracking frame to current playback time
+  let closestFrame = trackingData[0];
+  let minDiff = Math.abs(currentTime - closestFrame.timestamp);
+  for (let i = 1; i < trackingData.length; i++) {
+    const diff = Math.abs(currentTime - trackingData[i].timestamp);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closestFrame = trackingData[i];
+    }
+  }
+
+  // No nearby frame (e.g., scrubbed past end of data)
+  if (minDiff > 0.6) return;
+
+  // Compute letterbox-aware transform from native video pixels → canvas pixels
+  const rect = getVideoRenderRect(canvas, video);
+  if (!rect) return;
+  const { offsetX, offsetY, scaleX, scaleY } = rect;
+
+  // Scale everything up by devicePixelRatio
+  const ox = offsetX * dpr;
+  const oy = offsetY * dpr;
+  const sx = scaleX * dpr;
+  const sy = scaleY * dpr;
+
+  closestFrame.objects.forEach(({ bbox, label, conf }) => {
+    const [vx1, vy1, vx2, vy2] = bbox;
+
+    // Project from native video pixels → canvas display pixels
+    const bx = ox + vx1 * sx;
+    const by = oy + vy1 * sy;
+    const bw = (vx2 - vx1) * sx;
+    const bh = (vy2 - vy1) * sy;
+
+    const isHelmet = label === "Helmet";
+    const isUnknown = label === "Unknown";
+    const color = isUnknown ? "#6b7280" : isHelmet ? "#16a34a" : "#dc2626";
+    const cs = Math.max(10, Math.min(18, bw * 0.12));
+
+    // Semi-transparent fill
+    ctx.fillStyle = color + "1a";
     ctx.fillRect(bx, by, bw, bh);
 
+    // Main border
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 * dpr;
     ctx.strokeRect(bx, by, bw, bh);
 
-    ctx.lineWidth = 3;
-    [[bx, by, cs, cs], [bx + bw, by, -cs, cs], [bx, by + bh, cs, -cs], [bx + bw, by + bh, -cs, -cs]].forEach(
-      ([cx, cy, dx, dy]) => {
-        ctx.beginPath();
-        ctx.moveTo(cx + dx, cy);
-        ctx.lineTo(cx, cy);
-        ctx.lineTo(cx, cy + dy);
-        ctx.stroke();
-      }
-    );
+    // Corner accents
+    ctx.lineWidth = 3 * dpr;
+    [
+      [bx, by, cs, cs],
+      [bx + bw, by, -cs, cs],
+      [bx, by + bh, cs, -cs],
+      [bx + bw, by + bh, -cs, -cs],
+    ].forEach(([cx, cy, dx, dy]) => {
+      ctx.beginPath();
+      ctx.moveTo(cx + dx, cy);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(cx, cy + dy);
+      ctx.stroke();
+    });
 
-    ctx.font = "bold 13px monospace";
+    // Label badge
+    const fontSize = Math.max(11, Math.min(15, bw * 0.08)) * dpr;
+    ctx.font = `bold ${fontSize}px monospace`;
     const text = `${label}  ${Math.round(conf * 100)}%`;
-    const tw = ctx.measureText(text).width + 12;
-    ctx.fillStyle = color + "cc";
-    ctx.fillRect(bx, by - 22, tw, 22);
+    const tw = ctx.measureText(text).width + 12 * dpr;
+    const th = fontSize + 6 * dpr;
+    const labelY = by >= th ? by - th : by + bh;
+    ctx.fillStyle = color + "dd";
+    ctx.fillRect(bx, labelY, tw, th);
     ctx.fillStyle = "#fff";
-    ctx.fillText(text, bx + 6, by - 7);
+    ctx.fillText(text, bx + 6 * dpr, labelY + fontSize);
   });
 }
 
@@ -56,7 +143,7 @@ const fmt = (t) => {
   return `${m}:${s}`;
 };
 
-const VideoPlayer = ({ videoUrl, videoRef, violations = [] }) => {
+const VideoPlayer = ({ videoUrl, videoRef, violations = [], trackingData = [] }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const rafRef = useRef(null);
@@ -65,8 +152,21 @@ const VideoPlayer = ({ videoUrl, videoRef, violations = [] }) => {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
+  const trackingDataRef = useRef(trackingData);
+
+  useEffect(() => {
+    trackingDataRef.current = trackingData;
+    const video = videoRef.current;
+    if (video) {
+      drawBoxes(canvasRef.current, video, trackingData, video.currentTime);
+    }
+  }, [trackingData, videoRef]);
+
   const loop = useCallback(() => {
-    drawBoxes(canvasRef.current, videoRef.current);
+    const video = videoRef.current;
+    if (video) {
+      drawBoxes(canvasRef.current, video, trackingDataRef.current, video.currentTime);
+    }
     rafRef.current = requestAnimationFrame(loop);
   }, [videoRef]);
 
@@ -74,17 +174,44 @@ const VideoPlayer = ({ videoUrl, videoRef, violations = [] }) => {
     const video = videoRef.current;
     if (!video) return;
 
-    const onPlay = () => { setPlaying(true); loop(); };
-    const onPause = () => { setPlaying(false); cancelAnimationFrame(rafRef.current); drawBoxes(canvasRef.current, video); };
-    const onTimeUpdate = () => setCurrentTime(video.currentTime);
-    const onMeta = () => { setDuration(video.duration); drawBoxes(canvasRef.current, video); };
-    const onEnded = () => { setPlaying(false); cancelAnimationFrame(rafRef.current); };
+    const onPlay = () => {
+      setPlaying(true);
+      cancelAnimationFrame(rafRef.current);
+      loop();
+    };
+    const onPause = () => {
+      setPlaying(false);
+      cancelAnimationFrame(rafRef.current);
+      drawBoxes(canvasRef.current, video, trackingDataRef.current, video.currentTime);
+    };
+    const onTimeUpdate = () => {
+      setCurrentTime(video.currentTime);
+      if (video.paused) {
+        drawBoxes(canvasRef.current, video, trackingDataRef.current, video.currentTime);
+      }
+    };
+    const onMeta = () => {
+      setDuration(video.duration);
+      drawBoxes(canvasRef.current, video, trackingDataRef.current, video.currentTime);
+    };
+    const onEnded = () => {
+      setPlaying(false);
+      cancelAnimationFrame(rafRef.current);
+    };
 
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("loadedmetadata", onMeta);
     video.addEventListener("ended", onEnded);
+
+    if (!video.paused && !video.ended) {
+      setPlaying(true);
+      cancelAnimationFrame(rafRef.current);
+      loop();
+    } else {
+      drawBoxes(canvasRef.current, video, trackingDataRef.current, video.currentTime);
+    }
 
     return () => {
       video.removeEventListener("play", onPlay);
@@ -145,7 +272,6 @@ const VideoPlayer = ({ videoUrl, videoRef, violations = [] }) => {
         <canvas
           ref={canvasRef}
           className="absolute inset-0 w-full h-full pointer-events-none"
-          style={{ objectFit: "contain" }}
         />
 
         {/* Controls overlay */}

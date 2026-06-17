@@ -14,14 +14,19 @@ async function processImage(file) {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await api.post("/manual/image", formData, {
-    responseType: "blob",
-    headers: { "Content-Type": "multipart/form-data" },
-  });
+  const [blobRes, jsonRes] = await Promise.all([
+    api.post("/manual/image", formData, {
+      responseType: "blob",
+      headers: { "Content-Type": "multipart/form-data" },
+    }),
+    api.post("/manual/image/json", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })
+  ]);
 
-  const processedUrl = URL.createObjectURL(res.data);
+  const processedUrl = URL.createObjectURL(blobRes.data);
   const originalUrl = URL.createObjectURL(file);
-  return { originalUrl, processedUrl };
+  return { originalUrl, processedUrl, detections: jsonRes.data.detections || [] };
 }
 
 // ----- Video: hit the backend /manual/video endpoint -----
@@ -34,9 +39,10 @@ async function processVideo(file) {
   });
 
   const videoUrl = URL.createObjectURL(file);
-  // Backend returns: { violations: [{ timestamp, confidence, label, bbox }] }
+  // Backend returns: { violations: [{ timestamp, confidence, label, bbox }], tracking_data: [...] }
   const violations = res.data.violations.map((v, idx) => ({ ...v, id: idx + 1 }));
-  return { videoUrl, violations };
+  const trackingData = res.data.tracking_data || [];
+  return { videoUrl, violations, trackingData };
 }
 
 // ----------------------------------------------------------------
@@ -48,8 +54,10 @@ export function useManualAnalysis() {
   const [fileType, setFileType] = useState(null); // 'image' | 'video'
   const [originalUrl, setOriginalUrl] = useState(null);
   const [processedUrl, setProcessedUrl] = useState(null);
+  const [imageDetections, setImageDetections] = useState([]);
   const [videoUrl, setVideoUrl] = useState(null);
   const [violations, setViolations] = useState([]);
+  const [trackingData, setTrackingData] = useState([]);
   const [error, setError] = useState(null);
   const videoRef = useRef(null);
 
@@ -97,9 +105,11 @@ export function useManualAnalysis() {
       if (isVideo) {
         setVideoUrl(result.videoUrl);
         setViolations(result.violations);
+        setTrackingData(result.trackingData);
       } else {
         setOriginalUrl(result.originalUrl);
         setProcessedUrl(result.processedUrl);
+        setImageDetections(result.detections);
       }
 
       setStatus("done");
@@ -119,8 +129,10 @@ export function useManualAnalysis() {
     setFileType(null);
     setOriginalUrl(null);
     setProcessedUrl(null);
+    setImageDetections([]);
     setVideoUrl(null);
     setViolations([]);
+    setTrackingData([]);
     setError(null);
     setCurrentStep(-1);
     setCompletedSteps([]);
@@ -142,8 +154,10 @@ export function useManualAnalysis() {
     fileType,
     originalUrl,
     processedUrl,
+    imageDetections,
     videoUrl,
     violations,
+    trackingData,
     error,
     videoRef,
     handleUpload,

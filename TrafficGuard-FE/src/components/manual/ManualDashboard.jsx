@@ -6,6 +6,7 @@ import ProcessingStatus from "./ProcessingStatus";
 import BeforeAfterSlider from "./BeforeAfterSlider";
 import VideoPlayer from "./VideoPlayer";
 import ViolationLog from "./ViolationLog";
+import DetectedCropsList from "./DetectedCropsList";
 
 const ManualDashboard = () => {
   const {
@@ -17,8 +18,10 @@ const ManualDashboard = () => {
     fileType,
     originalUrl,
     processedUrl,
+    imageDetections,
     videoUrl,
     violations,
+    trackingData,
     error,
     videoRef,
     handleUpload,
@@ -112,8 +115,9 @@ const ManualDashboard = () => {
 
         {/* Done — Image result */}
         {isDone && fileType === "image" && (
-          <div className="h-full">
+          <div className="h-full overflow-y-auto pr-2 pb-8">
             <BeforeAfterSlider originalUrl={originalUrl} processedUrl={processedUrl} />
+            <DetectedCropsList originalUrl={originalUrl} detections={imageDetections} />
           </div>
         )}
 
@@ -125,6 +129,7 @@ const ManualDashboard = () => {
                 videoUrl={videoUrl}
                 videoRef={videoRef}
                 violations={violations}
+                trackingData={trackingData}
               />
             </div>
             <div className="col-span-4 h-full min-h-0 bg-white border border-gray-200 rounded-2xl p-4 shadow-sm overflow-hidden flex flex-col">

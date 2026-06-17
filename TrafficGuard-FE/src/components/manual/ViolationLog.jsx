@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 import { FiAlertTriangle, FiClock, FiChevronRight, FiShield } from "react-icons/fi";
+import API_CONFIG from "../../config/api.config";
 
 const fmt = (t) => {
   const m = Math.floor(t / 60);
@@ -8,58 +9,8 @@ const fmt = (t) => {
   return `${m}:${s}.${ds}`;
 };
 
-function captureFrames(videoUrl, violations) {
-  return new Promise((resolve) => {
-    const video = document.createElement("video");
-    video.src = videoUrl;
-    video.muted = true;
-    video.crossOrigin = "anonymous";
-
-    const canvas = document.createElement("canvas");
-    canvas.width = 160;
-    canvas.height = 90;
-    const ctx = canvas.getContext("2d");
-
-    const results = {};
-    let idx = 0;
-
-    const next = () => {
-      if (idx >= violations.length) { resolve(results); return; }
-      video.currentTime = violations[idx].timestamp;
-    };
-
-    video.addEventListener("loadedmetadata", next);
-    video.addEventListener("seeked", () => {
-      ctx.drawImage(video, 0, 0, 160, 90);
-      // Red highlight box
-      ctx.strokeStyle = "#dc2626";
-      ctx.lineWidth = 2;
-      const bx = 85, by = 12, bw = 52, bh = 58;
-      ctx.fillStyle = "#dc262630";
-      ctx.fillRect(bx, by, bw, bh);
-      ctx.strokeRect(bx, by, bw, bh);
-      results[violations[idx].id] = canvas.toDataURL("image/jpeg", 0.85);
-      idx++;
-      next();
-    });
-    video.addEventListener("error", () => resolve(results));
-    video.load();
-  });
-}
-
 const ViolationLog = ({ violations, videoUrl, onSeek }) => {
-  const [thumbnails, setThumbnails] = useState({});
-  const [loadingThumbs, setLoadingThumbs] = useState(true);
   const [activeId, setActiveId] = useState(null);
-
-  useEffect(() => {
-    if (!videoUrl || violations.length === 0) { setLoadingThumbs(false); return; }
-    setLoadingThumbs(true);
-    captureFrames(videoUrl, violations).then((results) => {
-      setThumbnails(results);
-      setLoadingThumbs(false);
-    });
-  }, [videoUrl, violations]);
 
   const handleClick = (v) => {
     setActiveId(v.id);
@@ -100,15 +51,11 @@ const ViolationLog = ({ violations, videoUrl, onSeek }) => {
             >
               {/* Thumbnail */}
               <div className="relative w-16 h-10 rounded-lg overflow-hidden bg-gray-100 flex-shrink-0">
-                {thumbnails[v.id] ? (
-                  <img src={thumbnails[v.id]} alt="" className="w-full h-full object-cover" />
+                {v.image_path ? (
+                  <img src={`${API_CONFIG.BASE_URL}${v.image_path}`} alt="Violation" className="w-full h-full object-cover" />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center">
-                    {loadingThumbs ? (
-                      <div className="w-4 h-4 border-2 border-gray-300 border-t-emerald-500 rounded-full animate-spin" />
-                    ) : (
-                      <FiAlertTriangle className="text-red-400 text-xs" />
-                    )}
+                    <FiAlertTriangle className="text-red-400 text-xs" />
                   </div>
                 )}
                 <div

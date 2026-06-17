@@ -105,34 +105,98 @@ def _draw_summary_bar(frame: np.ndarray, counts: Dict[str, int], total: int):
 class YOLOService:
     def __init__(self):
         self.model = None
+        self.helmet_model = None
         self.load_model()
 
     def load_model(self):
         """Load the custom trained YOLO model"""
         try:
             model_path = os.path.join(settings.MODEL_DIR, "motobike_detection.pt")
+            helmet_path = os.path.join(settings.MODEL_DIR, "helmet_detection.pt")
             if not os.path.exists(model_path):
                 raise FileNotFoundError(
                     f"Model not found at {model_path}. "
                     f"Please place motobike_detection.pt in {settings.MODEL_DIR}"
                 )
+            if not os.path.exists(helmet_path):
+                raise FileNotFoundError(
+                    f"Helmet Model not found at {helmet_path}."
+                )
             self.model = YOLO(model_path)
+            self.helmet_model = YOLO(helmet_path)
             print(f"Custom model loaded successfully from {model_path}")
+            print(f"Helmet model loaded successfully from {helmet_path}")
             print(f"Model classes: {self.model.names}")
         except Exception as e:
             print(f"Error loading custom model: {e}")
             raise
 
+    # ── Tuning constants ────────────────────────────────────────────────────
+    # Minimum confidence to accept a motorcycle detection from the main model
+    _MOTO_CONF_THRESH = 0.35
+    # Minimum confidence to trust a helmet detection result
+    _HELMET_CONF_THRESH = 0.10
+    # Minimum crop side-length (px) sent to the helmet model;
+    # small crops are upscaled for better recognition
+    _MIN_CROP_SIZE = 128
+    # Fraction of the motorcycle box height used for the rider crop.
+    # The rider sits in roughly the top 55% of the detected motorcycle box.
+    _RIDER_CROP_RATIO = 0.55
+
+    def _get_rider_crop(
+        self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int
+    ) -> np.ndarray:
+        """
+        Extract the rider's upper-body region from a motorcycle bounding box.
+
+        Helmets appear in the upper portion of the motorcycle box. We crop
+        the top `_RIDER_CROP_RATIO` of the height and add a small upward
+        padding buffer so heads sitting at the very top of the box aren't
+        clipped, then upscale to a minimum size for the helmet model.
+        """
+        img_h, img_w = frame.shape[:2]
+        box_h = y2 - y1
+
+        # Add 10% of box height as padding above the crop (clipped to image top)
+        pad_top = int(box_h * 0.10)
+        crop_y1 = max(0, y1 - pad_top)
+        # Take the upper portion of the box for the rider's head/torso
+        crop_y2 = min(img_h, y1 + int(box_h * self._RIDER_CROP_RATIO))
+        crop_x1 = max(0, x1)
+        crop_x2 = min(img_w, x2)
+
+        crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        if crop.size == 0:
+            return None
+
+        # Upscale tiny crops so the model sees enough detail.
+        # Use INTER_LANCZOS4 for better edge preservation than cubic.
+        h, w = crop.shape[:2]
+        if h < self._MIN_CROP_SIZE or w < self._MIN_CROP_SIZE:
+            scale = self._MIN_CROP_SIZE / min(h, w)
+            new_w = max(self._MIN_CROP_SIZE, int(w * scale))
+            new_h = max(self._MIN_CROP_SIZE, int(h * scale))
+            crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+
+        return crop
+
     async def detect(self, frame: np.ndarray) -> Dict[str, Any]:
         """
         Perform traffic detection on a frame using custom model.
         Returns detection results and road fullness.
+
+        Accuracy improvements vs. naive implementation:
+        - Only accepts motorcycle detections above _MOTO_CONF_THRESH.
+        - Runs helmet detection on the upper-body crop (not the full bike box).
+        - Requires helmet confidence >= _HELMET_CONF_THRESH; anything below
+          stays as 'unknown' rather than accepting a noisy low-conf guess.
+        - Upscales tiny rider crops before running the helmet model.
         """
         if self.model is None:
             raise RuntimeError("Model not loaded")
 
         try:
-            results = self.model(frame)
+            results = self.model(frame, conf=self._MOTO_CONF_THRESH, iou=0.45)
 
             frame_area = frame.shape[0] * frame.shape[1]
             vehicle_area = 0
@@ -144,14 +208,48 @@ class YOLOService:
                     confidence = float(box.conf[0])
                     class_id = int(box.cls[0])
                     label = self.model.names[class_id]
+                    if label.lower() == "motorcycle":
+                        label = "motorbike"
+                    elif label.lower() == "bike":
+                        label = "bicycle"
 
                     vehicle_area += (x2 - x1) * (y2 - y1)
-                    detections.append({
+
+                    detection_dict = {
                         "label": label,
                         "confidence": confidence,
                         "bbox": [x1, y1, x2, y2],
                         "class_id": class_id,
-                    })
+                        "helmet_status": "unknown",
+                        "helmet_confidence": 0.0,
+                    }
+
+                    # Run helmet detection on motorcycle crops only
+                    if class_id == 0 and y2 > y1 and x2 > x1:
+                        rider_crop = self._get_rider_crop(frame, x1, y1, x2, y2)
+                        if rider_crop is not None:
+                            h_res = self.helmet_model(
+                                rider_crop,
+                                conf=self._HELMET_CONF_THRESH,
+                                imgsz=320,
+                                verbose=False,
+                            )
+                            best_h_conf = 0.0
+                            h_status = "unknown"
+                            for hr in h_res:
+                                for h_box in hr.boxes:
+                                    h_conf = float(h_box.conf[0])
+                                    h_cls = int(h_box.cls[0])
+                                    if h_conf > best_h_conf:
+                                        best_h_conf = h_conf
+                                        h_status = self.helmet_model.names[h_cls]
+
+                            # Only accept if confidence meets threshold
+                            if h_status in ("helmet", "no_helmet") and best_h_conf >= self._HELMET_CONF_THRESH:
+                                detection_dict["helmet_status"] = h_status
+                                detection_dict["helmet_confidence"] = round(best_h_conf, 4)
+
+                    detections.append(detection_dict)
 
             fullness = (vehicle_area / frame_area) * 100 if frame_area > 0 else 0
 
@@ -164,13 +262,38 @@ class YOLOService:
             print(f"Error during detection: {e}")
             raise
 
+    def track_sync(self, frame: np.ndarray) -> List[Any]:
+        """
+        Synchronously perform traffic detection and tracking on a frame using custom model.
+        - conf=0.35: reject low-confidence noise boxes
+        - iou=0.45:  tighter NMS overlap threshold for cleaner box separation
+        - persist=True: ByteTrack maintains track IDs across consecutive frames
+        Returns the raw YOLO results.
+        """
+        if self.model is None:
+            raise RuntimeError("Model not loaded")
+
+        try:
+            results = self.model.track(
+                frame,
+                persist=True,
+                tracker="bytetrack.yaml",
+                conf=0.35,
+                iou=0.45,
+                verbose=False,
+            )
+            return results
+        except Exception as e:
+            print(f"Error during tracking: {e}")
+            raise
+
     async def detect_with_visualization(self, frame: np.ndarray) -> Tuple[Dict, np.ndarray]:
         """
         Run detection and return both results and a clean annotated frame.
         Each detection gets:
-          • A coloured bounding box (per class)
+          • A coloured bounding box: green (helmet) / red (no_helmet) / orange (unknown)
           • A numbered badge in the top-left corner of the box
-          • A pill-shaped label tag (class + confidence) above / inside the box
+          • A pill-shaped label tag showing motorbike conf + helmet verdict + helmet conf
         A summary bar at the top shows totals.
         """
         results = await self.detect(frame)
@@ -184,7 +307,20 @@ class YOLOService:
             label = det["label"]
             conf = det["confidence"]
             class_id = det["class_id"]
-            color = _get_color(class_id)
+
+            helmet_status = det.get("helmet_status", "unknown")
+            helmet_conf = det.get("helmet_confidence", 0.0)
+
+            # Colour-code the box by helmet result
+            if class_id == 0:
+                if helmet_status == "helmet":
+                    color = (0, 180, 60)     # Green
+                elif helmet_status == "no_helmet":
+                    color = (0, 0, 220)      # Red (BGR)
+                else:
+                    color = (0, 140, 255)    # Orange — unknown
+            else:
+                color = _get_color(class_id)
 
             # Per-class running index (1-based)
             per_class_idx[class_id] = per_class_idx.get(class_id, 0) + 1
@@ -212,7 +348,10 @@ class YOLOService:
             )
 
             # ── Label tag ─────────────────────────────────────────────────
-            label_text = f"{label}  {conf:.0%}"
+            if helmet_status and helmet_status != "unknown":
+                label_text = f"{label} {conf:.0%} | {helmet_status.replace('_',' ')} {helmet_conf:.0%}"
+            else:
+                label_text = f"{label}  {conf:.0%} | helmet: ?"
             _draw_label(vis, label_text, x1, y1, x2, y2, color)
 
         # ── Summary bar ───────────────────────────────────────────────────
@@ -226,6 +365,10 @@ class YOLOService:
             for det in detections:
                 x1, y1, x2, y2 = det["bbox"]
                 label = det["label"]
+                if label.lower() == "motorcycle":
+                    label = "motorbike"
+                elif label.lower() == "bike":
+                    label = "bicycle"
                 conf = det["confidence"]
                 class_id = det.get("class_id", 0)
                 color = _get_color(class_id)

@@ -94,7 +94,7 @@ class CameraService:
                 stats[camera_id] = {
                     "total_vehicles": 0,
                     "flow_rate": 0.0,
-                    "vehicle_types": {"car": 0, "truck": 0, "motorcycle": 0},
+                    "vehicle_types": {"car": 0, "truck": 0, "motorbike": 0},
                     "timestamp": ""
                 }
         return stats
