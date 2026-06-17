@@ -27,6 +27,13 @@ app.add_middleware(
 # Include the API router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
+# Mount violations directory
+import os
+from fastapi.staticfiles import StaticFiles
+violations_dir = os.path.join(settings.BASE_DIR, "violations")
+os.makedirs(violations_dir, exist_ok=True)
+app.mount("/static/violations", StaticFiles(directory=violations_dir), name="violations")
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to TrafficGuard Backend API"}
