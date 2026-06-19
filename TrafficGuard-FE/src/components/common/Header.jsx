@@ -20,7 +20,7 @@ const Header = () => {
     },
     {
       key: "/playground",
-      label: "Playground",
+      label: "Camera",
     },
     {
       key: "/dashboard",
